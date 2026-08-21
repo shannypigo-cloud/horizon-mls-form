@@ -123,6 +123,13 @@
     padding:14px 16px; width:min(92vw,420px);
   }
   .scanner-header span{ color:#fff; font-family:'Poppins',sans-serif; font-weight:600; font-size:15px; }
+  .scanner-header-btns{ display:flex; align-items:center; gap:10px; }
+  .torch-btn{
+    background:rgba(255,255,255,0.15); border:none; color:#fff; width:34px; height:34px;
+    border-radius:10px; cursor:pointer; display:flex; align-items:center; justify-content:center;
+  }
+  .torch-btn svg{ width:18px; height:18px; }
+  .torch-btn.active{ background:var(--orange); }
   .scanner-close{
     background:var(--orange); border:none; color:#fff; width:34px; height:34px;
     border-radius:10px; font-size:18px; cursor:pointer; line-height:1;
@@ -176,7 +183,14 @@
 <div class="scanner-overlay" id="scannerOverlay">
   <div class="scanner-header">
     <span>Scan MVA</span>
-    <button class="scanner-close" id="scannerCloseBtn" type="button">&times;</button>
+    <div class="scanner-header-btns">
+      <button class="torch-btn" id="torchBtn" type="button" aria-label="Toggle flashlight" style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L4 14h6l-2 8 10-14h-6l2-6z" stroke="white" stroke-width="1.8" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </button>
+      <button class="scanner-close" id="scannerCloseBtn" type="button">&times;</button>
+    </div>
   </div>
   <div class="scanner-box">
     <div id="reader"></div>
@@ -223,6 +237,7 @@ try {
   var fallbackEl = document.getElementById('scannerFallback');
   var hintEl = document.getElementById('scannerHint');
   var readerEl = document.getElementById('reader');
+  var torchBtn = document.getElementById('torchBtn');
 
   function getScanFormats(){
     // Built lazily, only once the button is tapped -- if this ran at page
@@ -262,8 +277,16 @@ try {
   }
 
   function startWithConstraints(constraints){
+    // Merge in continuous autofocus + a higher resolution request so small
+    // barcodes/QR codes have more detail to decode from. Not all cameras
+    // support every one of these -- unsupported ones are just ignored.
+    var merged = Object.assign({}, constraints, {
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      advanced: [{ focusMode: "continuous" }]
+    });
     return html5Qrcode.start(
-      constraints,
+      merged,
       { fps: 10, qrbox: function(vw, vh){
           var size = Math.floor(Math.min(vw, vh) * 0.7);
           return { width: size, height: Math.floor(size * 0.65) };
@@ -272,7 +295,36 @@ try {
       },
       onScanSuccess,
       function(){ /* per-frame no-match, ignore */ }
-    );
+    ).then(function(){
+      checkTorchSupport();
+    });
+  }
+
+  var torchOn = false;
+
+  function checkTorchSupport(){
+    try {
+      var capabilities = html5Qrcode.getRunningTrackCapabilities();
+      if (capabilities && capabilities.torch){
+        torchBtn.style.display = 'flex';
+      } else {
+        torchBtn.style.display = 'none';
+      }
+    } catch(e){
+      torchBtn.style.display = 'none';
+    }
+  }
+
+  function toggleTorch(){
+    if (!html5Qrcode) return;
+    torchOn = !torchOn;
+    html5Qrcode.applyVideoConstraints({ advanced: [{ torch: torchOn }] })
+      .then(function(){
+        torchBtn.classList.toggle('active', torchOn);
+      })
+      .catch(function(){
+        torchOn = !torchOn; // revert on failure
+      });
   }
 
   function showFallbackWithReason(reason){
@@ -358,6 +410,9 @@ try {
 
   function closeScanner(){
     overlay.classList.remove('open');
+    torchOn = false;
+    torchBtn.classList.remove('active');
+    torchBtn.style.display = 'none';
     if (html5Qrcode && scanning){
       html5Qrcode.stop().then(function(){
         html5Qrcode.clear();
@@ -370,6 +425,7 @@ try {
 
   document.getElementById('scanBtn').addEventListener('click', openScanner);
   document.getElementById('scannerCloseBtn').addEventListener('click', closeScanner);
+  torchBtn.addEventListener('click', toggleTorch);
   document.getElementById('fallbackCloseBtn').addEventListener('click', function(){
     closeScanner();
     mvaInput.focus();
