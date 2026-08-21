@@ -184,6 +184,11 @@
   <div class="scanner-header">
     <span>Scan MVA</span>
     <div class="scanner-header-btns">
+      <button class="torch-btn" id="flipBtn" type="button" aria-label="Switch camera" style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M20 8v6a2 2 0 0 1-2 2H6m0 0 3-3m-3 3 3 3M4 16v-6a2 2 0 0 1 2-2h12m0 0-3 3m3-3-3-3" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
       <button class="torch-btn" id="torchBtn" type="button" aria-label="Toggle flashlight" style="display:none;">
         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M12 2L4 14h6l-2 8 10-14h-6l2-6z" stroke="white" stroke-width="1.8" stroke-linejoin="round" fill="none"/>
@@ -238,6 +243,7 @@ try {
   var hintEl = document.getElementById('scannerHint');
   var readerEl = document.getElementById('reader');
   var torchBtn = document.getElementById('torchBtn');
+  var flipBtn = document.getElementById('flipBtn');
 
   function getScanFormats(){
     // Built lazily, only once the button is tapped -- if this ran at page
@@ -277,27 +283,33 @@ try {
   }
 
   function startWithConstraints(constraints){
-    // IMPORTANT: the first argument (camera selector) must contain exactly ONE
-    // key -- facingMode OR deviceId. Resolution/focus hints belong in the
-    // config object's videoConstraints instead, NOT merged into the selector.
+    // Kept deliberately minimal -- this is the exact config that worked
+    // reliably. Do NOT add resolution/focus hints into either argument here;
+    // doing so caused start() failures and cascading transition errors.
     return html5Qrcode.start(
       constraints,
       { fps: 10, qrbox: function(vw, vh){
           var size = Math.floor(Math.min(vw, vh) * 0.7);
           return { width: size, height: Math.floor(size * 0.65) };
         },
-        aspectRatio: 1.5,
-        videoConstraints: {
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          advanced: [{ focusMode: "continuous" }]
-        }
+        aspectRatio: 1.5
       },
       onScanSuccess,
       function(){ /* per-frame no-match, ignore */ }
     ).then(function(){
+      // Applied only AFTER the camera is already running, so a failure here
+      // can never prevent the scanner from starting.
+      applyFocusEnhancements();
       checkTorchSupport();
     });
+  }
+
+  function applyFocusEnhancements(){
+    try {
+      html5Qrcode.applyVideoConstraints({
+        advanced: [{ focusMode: "continuous" }]
+      }).catch(function(){ /* unsupported on this camera -- fine, ignore */ });
+    } catch(e){ /* ignore */ }
   }
 
   var torchOn = false;
@@ -356,60 +368,87 @@ try {
     showFallback();
   }
 
+  var cameraList = [];
+  var currentCamIndex = -1;
+
   function openScanner(){
     if (scanning){ return; } // ignore rapid double-taps while already active
 
     if (typeof Html5Qrcode === 'undefined' || typeof Html5QrcodeSupportedFormats === 'undefined'){
       overlay.classList.add('open');
-      showFallbackWithReason('Scanner library did not load (Html5Qrcode is undefined). Check that html5-qrcode.min.js is uploaded in the same folder as index.html.');
+      showFallbackWithReason('Scanner library did not load (Html5Qrcode is undefined).');
       return;
     }
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
       overlay.classList.add('open');
-      showFallbackWithReason('navigator.mediaDevices.getUserMedia is not available in this browser context.');
+      showFallbackWithReason('Camera access is not available in this browser.');
       return;
     }
 
     overlay.classList.add('open');
     resetScannerUI();
 
+    // Enumerate cameras FIRST so we can deliberately choose the back one and
+    // offer a manual switch, rather than relying on facingMode guessing.
+    Html5Qrcode.getCameras().then(function(cameras){
+      if (!cameras || !cameras.length){ throw new Error('No cameras found on this device.'); }
+      cameraList = cameras;
+
+      // Show the flip button whenever there is more than one camera.
+      flipBtn.style.display = cameras.length > 1 ? 'flex' : 'none';
+
+      // Prefer an explicitly back/rear labelled camera. On most phones the
+      // LAST entry is the main rear camera, so that is the fallback guess.
+      var idx = cameras.findIndex(function(c){
+        return /back|rear|environment/i.test(c.label || '');
+      });
+      if (idx === -1){ idx = cameras.length - 1; }
+      currentCamIndex = idx;
+
+      return startCamera(cameras[idx].id);
+    }).catch(function(err){
+      scanning = false;
+      showFallbackWithReason(err && err.message ? err.message : String(err));
+    });
+  }
+
+  function startCamera(deviceId){
     try {
       html5Qrcode = new Html5Qrcode("reader", {
         formatsToSupport: getScanFormats(),
         verbose:false
       });
     } catch(e){
-      showFallbackWithReason('Failed to initialize scanner: ' + (e && e.message ? e.message : e));
-      return;
+      throw e;
     }
     scanning = true;
+    return startWithConstraints({ deviceId: { exact: deviceId } });
+  }
 
-    // Try the back camera first (works on nearly all Android + iOS Safari 15.4+)
-    startWithConstraints({ facingMode: { exact: "environment" } }).catch(function(err1){
-      // Fallback 1: looser facingMode constraint. Give the library a brief
-      // moment to fully unwind the previous failed attempt first, or it can
-      // throw "Cannot transition to a new state, already under transition".
-      return safeStopAndWait(250).then(function(){
-        return startWithConstraints({ facingMode: "environment" });
-      }).catch(function(err2){
-        // Fallback 2: enumerate cameras and pick the last one (usually rear-facing)
-        return safeStopAndWait(250).then(function(){
-          return Html5Qrcode.getCameras();
-        }).then(function(cameras){
-          if (!cameras || !cameras.length){ throw new Error('No cameras returned by getCameras()'); }
-          var backCam = cameras.find(function(c){ return /back|rear|environment/i.test(c.label); });
-          var chosen = backCam ? backCam.id : cameras[cameras.length - 1].id;
-          return startWithConstraints({ deviceId: { exact: chosen } });
-        }).catch(function(err3){
-          var msg = [
-            'exact-environment: ' + (err1 && err1.message ? err1.message : err1),
-            'environment: ' + (err2 && err2.message ? err2.message : err2),
-            'deviceId: ' + (err3 && err3.message ? err3.message : err3)
-          ].join(' | ');
-          throw new Error(msg);
-        });
-      });
+  function flipCamera(){
+    if (!cameraList.length || cameraList.length < 2) return;
+    currentCamIndex = (currentCamIndex + 1) % cameraList.length;
+    var nextId = cameraList[currentCamIndex].id;
+
+    // Fully tear down the running camera before starting the next one.
+    torchOn = false;
+    torchBtn.classList.remove('active');
+    torchBtn.style.display = 'none';
+
+    var stopPromise;
+    try {
+      stopPromise = html5Qrcode.stop().catch(function(){});
+    } catch(e){
+      stopPromise = Promise.resolve();
+    }
+    stopPromise.then(function(){
+      try { html5Qrcode.clear(); } catch(e){}
+      scanning = false;
+      if (readerEl) readerEl.innerHTML = '';
+      return new Promise(function(r){ setTimeout(r, 250); });
+    }).then(function(){
+      return startCamera(nextId);
     }).catch(function(err){
       scanning = false;
       showFallbackWithReason(err && err.message ? err.message : String(err));
@@ -417,14 +456,23 @@ try {
   }
 
   function safeStopAndWait(ms){
-    var stopPromise;
+    // A failed start() leaves the instance in a half-initialized state, and
+    // calling stop() on it is exactly what throws "already under transition".
+    // So instead of stopping it, discard it and build a clean instance.
     try {
-      stopPromise = html5Qrcode.stop().catch(function(){ /* ignore */ });
-    } catch(e){
-      stopPromise = Promise.resolve();
-    }
-    return stopPromise.then(function(){
-      return new Promise(function(resolve){ setTimeout(resolve, ms); });
+      if (readerEl) { readerEl.innerHTML = ''; }
+    } catch(e){ /* ignore */ }
+
+    return new Promise(function(resolve){
+      setTimeout(function(){
+        try {
+          html5Qrcode = new Html5Qrcode("reader", {
+            formatsToSupport: getScanFormats(),
+            verbose:false
+          });
+        } catch(e){ /* ignore -- next start() will surface a real error */ }
+        resolve();
+      }, ms);
     });
   }
 
@@ -433,6 +481,7 @@ try {
     torchOn = false;
     torchBtn.classList.remove('active');
     torchBtn.style.display = 'none';
+    flipBtn.style.display = 'none';
     if (html5Qrcode && scanning){
       html5Qrcode.stop().then(function(){
         html5Qrcode.clear();
@@ -446,6 +495,7 @@ try {
   document.getElementById('scanBtn').addEventListener('click', openScanner);
   document.getElementById('scannerCloseBtn').addEventListener('click', closeScanner);
   torchBtn.addEventListener('click', toggleTorch);
+  flipBtn.addEventListener('click', flipCamera);
   document.getElementById('fallbackCloseBtn').addEventListener('click', function(){
     closeScanner();
     mvaInput.focus();
