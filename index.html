@@ -277,21 +277,21 @@ try {
   }
 
   function startWithConstraints(constraints){
-    // Merge in continuous autofocus + a higher resolution request so small
-    // barcodes/QR codes have more detail to decode from. Not all cameras
-    // support every one of these -- unsupported ones are just ignored.
-    var merged = Object.assign({}, constraints, {
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-      advanced: [{ focusMode: "continuous" }]
-    });
+    // IMPORTANT: the first argument (camera selector) must contain exactly ONE
+    // key -- facingMode OR deviceId. Resolution/focus hints belong in the
+    // config object's videoConstraints instead, NOT merged into the selector.
     return html5Qrcode.start(
-      merged,
+      constraints,
       { fps: 10, qrbox: function(vw, vh){
           var size = Math.floor(Math.min(vw, vh) * 0.7);
           return { width: size, height: Math.floor(size * 0.65) };
         },
-        aspectRatio: 1.5
+        aspectRatio: 1.5,
+        videoConstraints: {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: "continuous" }]
+        }
       },
       onScanSuccess,
       function(){ /* per-frame no-match, ignore */ }
