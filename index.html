@@ -357,6 +357,8 @@ try {
   }
 
   function openScanner(){
+    if (scanning){ return; } // ignore rapid double-taps while already active
+
     if (typeof Html5Qrcode === 'undefined' || typeof Html5QrcodeSupportedFormats === 'undefined'){
       overlay.classList.add('open');
       showFallbackWithReason('Scanner library did not load (Html5Qrcode is undefined). Check that html5-qrcode.min.js is uploaded in the same folder as index.html.');
@@ -385,10 +387,16 @@ try {
 
     // Try the back camera first (works on nearly all Android + iOS Safari 15.4+)
     startWithConstraints({ facingMode: { exact: "environment" } }).catch(function(err1){
-      // Fallback 1: looser facingMode constraint
-      return startWithConstraints({ facingMode: "environment" }).catch(function(err2){
+      // Fallback 1: looser facingMode constraint. Give the library a brief
+      // moment to fully unwind the previous failed attempt first, or it can
+      // throw "Cannot transition to a new state, already under transition".
+      return safeStopAndWait(250).then(function(){
+        return startWithConstraints({ facingMode: "environment" });
+      }).catch(function(err2){
         // Fallback 2: enumerate cameras and pick the last one (usually rear-facing)
-        return Html5Qrcode.getCameras().then(function(cameras){
+        return safeStopAndWait(250).then(function(){
+          return Html5Qrcode.getCameras();
+        }).then(function(cameras){
           if (!cameras || !cameras.length){ throw new Error('No cameras returned by getCameras()'); }
           var backCam = cameras.find(function(c){ return /back|rear|environment/i.test(c.label); });
           var chosen = backCam ? backCam.id : cameras[cameras.length - 1].id;
@@ -405,6 +413,18 @@ try {
     }).catch(function(err){
       scanning = false;
       showFallbackWithReason(err && err.message ? err.message : String(err));
+    });
+  }
+
+  function safeStopAndWait(ms){
+    var stopPromise;
+    try {
+      stopPromise = html5Qrcode.stop().catch(function(){ /* ignore */ });
+    } catch(e){
+      stopPromise = Promise.resolve();
+    }
+    return stopPromise.then(function(){
+      return new Promise(function(resolve){ setTimeout(resolve, ms); });
     });
   }
 
